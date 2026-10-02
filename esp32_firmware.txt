@@ -1,0 +1,140 @@
+#include <SD.h>
+#include <SPI.h>
+#include <driver/i2s.h>
+
+// --- Pin Configuration ---
+#define SD_CS_PIN 5     // Chip Select pin for SD Card Module
+#define I2S_WS 15       // Word Select (LRCLK) for I2S Mic
+#define I2S_SD 13       // Serial Data (DOUT) for I2S Mic
+#define I2S_SCK 2       // Serial Clock (BCLK) for I2S Mic
+
+// --- Model Weight Buffers ---
+// These will store the weights loaded from the SD card
+float* snn_router_weights;
+float* noise_gru_weights;
+float* speaker_gru_weights;
+
+// --- Helper to Load Binary Files from SD ---
+bool loadWeightsFromSD(const char* path, float** buffer, size_t size_bytes) {
+  File file = SD.open(path, FILE_READ);
+  if (!file) {
+    Serial.printf("Failed to open %s. Check if SD card is mounted properly.\n", path);
+    return false;
+  }
+  
+  // Allocate memory in PSRAM (or SRAM if small enough)
+  *buffer = (float*)malloc(size_bytes);
+  if (*buffer == NULL) {
+    Serial.println("Failed to allocate memory for weights!");
+    file.close();
+    return false;
+  }
+  
+  file.read((uint8_t*)*buffer, size_bytes);
+  file.close();
+  Serial.printf("Successfully loaded %s (%u bytes)\n", path, size_bytes);
+  return true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  // 1. Initialize SD Card
+  Serial.println("Initializing SD Card...");
+  if (!SD.begin(SD_CS_PIN)) {
+    Serial.println("SD Card Mount Failed");
+    return;
+  }
+  
+  // 2. Load Model Weights
+  // Note: Adjust the 'size_bytes' argument to exactly match the file sizes of your .bin files
+  Serial.println("Loading models from SD Card...");
+  loadWeightsFromSD("/custom_router_weights.bin", &snn_router_weights, 5308); 
+  loadWeightsFromSD("/noise_suppression.bin", &noise_gru_weights, 5900);
+  loadWeightsFromSD("/speaker_verification.bin", &speaker_gru_weights, 7900);
+
+  // 3. Initialize I2S Microphone (16kHz, 16-bit, Mono)
+  Serial.println("Initializing I2S Microphone...");
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = 16000,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 64,
+    .use_apll = false
+  };
+  
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_SCK,
+    .ws_io_num = I2S_WS,
+    .data_out_num = I2S_PIN_NO_CHANGE,
+    .data_in_num = I2S_SD
+  };
+  
+  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_NUM_0, &pin_config);
+  
+  Serial.println("System Ready. Listening for audio...");
+}
+
+// --- Inference Stubs ---
+// (In a full implementation, you would write matrix multiplication logic here)
+
+int runSNNRouter(float* audio_buffer) {
+  // TODO: 
+  // 1. Compute Mel Spectrogram
+  // 2. Apply Delta Modulation (Spike Generation)
+  // 3. Run Leaky Integrate-and-Fire Network using `snn_router_weights`
+  
+  // Returns:
+  // 0 = Silence
+  // 1 = Noise Clean
+  // 2 = Speaker Verify
+  
+  // Returning 1 for demonstration
+  return 1; 
+}
+
+void runNoiseSuppression(float* audio_buffer) {
+  Serial.println("--> Running Noise Suppression GRU (Denoising audio)...");
+  // TODO: Implement ExplicitGRUCell forward pass using `noise_gru_weights`
+}
+
+void runSpeakerVerification(float* audio_buffer) {
+  Serial.println("--> Running Speaker Verification GRU (Extracting embeddings)...");
+  // TODO: Implement ExplicitGRUCell forward pass using `speaker_gru_weights`
+}
+
+void loop() {
+  // 1. Read Audio from I2S Microphone
+  size_t bytes_read;
+  int16_t i2s_read_buff[16000]; // Buffer for 1 second of audio at 16kHz
+  
+  i2s_read(I2S_NUM_0, (void*)i2s_read_buff, sizeof(i2s_read_buff), &bytes_read, portMAX_DELAY);
+  
+  // Convert 16-bit PCM to float for the neural network
+  float float_audio[16000];
+  for(int i = 0; i < 16000; i++) {
+     float_audio[i] = (float)i2s_read_buff[i] / 32768.0f;
+  }
+
+  // 2. Run Spiking Neural Network Router
+  int command = runSNNRouter(float_audio);
+  
+  // 3. Route to specific model based on output spike
+  if (command == 1) {
+    Serial.println("Command Detected: 'Noise Clean'");
+    runNoiseSuppression(float_audio);
+  } else if (command == 2) {
+    Serial.println("Command Detected: 'Speaker Verify'");
+    runSpeakerVerification(float_audio);
+  } else {
+    // Silence or unknown
+  }
+  
+  delay(10); // Small delay to avoid watchdog timer reset
+}
